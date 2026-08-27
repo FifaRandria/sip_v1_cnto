@@ -1,0 +1,164 @@
+================================================================================
+MICROSIP - RESTRICTION D'ACCES AUX PARAMETRES ET AUX COMPTES (2FA)
+Fichier explicatif des modifications
+Date : 03/08/2026
+================================================================================
+
+1. CONTEXTE
+--------------------------------------------------------------------------------
+MicroSIP est utilise par des agents de call center. Les responsables souhaitent
+que les fonctions suivantes ne soient plus accessibles librement par les agents :
+
+  - "Parametres" (menu -> Settings, raccourci Ctrl+P)
+  - "Gestion / edition des comptes" (Ajouter un compte, Editer un compte,
+    Editer le compte local, raccourcis Ctrl+M et Ctrl+L)
+  - L'auto-ouverture de la fenetre de compte quand aucun compte n'est configure
+    (fonction interne OnAccount)
+
+A chaque tentative d'acces, une boite de dialogue demande un code 2FA a 6
+chiffres (double authentification). Ce code est genere par une application
+d'authentification (Google Authenticator, Microsoft Authenticator, Authy...)
+a partir d'un secret partage (RFC 6238 / TOTP).
+
+AUCUN FICHIER n'est utilise : le secret est ECRIT EN DUR dans le code source
+et compile dans microsip.exe. Il n'y a donc pas de fichier de mot de passe ni
+de fichier de secret a proteger cote dossier.
+
+--------------------------------------------------------------------------------
+2. LE SECRET 2FA (DANS LE CODE SOURCE)
+--------------------------------------------------------------------------------
+Le secret Base32 est une constante du fichier mainDlg.cpp, dans la methode
+CmainDlg::CheckAdminAuth() :
+
+    const char* TOTPSecret = "JBSWY3DPEHPK3PXP";
+
+IMPORTANT - AVANT LIVRAISON, REMPLACER CETTE VALEUR :
+  1. Generer un secret aleatoire Base32 (32 caracteres conseilles), par
+     exemple avec un generateur en ligne fiable ou via OpenSSL :
+        openssl rand -base64 20 | tr -d '=+/'
+     puis convertir le resultat en Base32 (ou utiliser un generateur qui
+     fournit directement un secret Base32 + QR code).
+  2. Remplacer la valeur de TOTPSecret par ce nouveau secret.
+  3. Recompiler microsip.exe.
+  4. Enregistrer le meme secret dans l'application d'authentification des
+     responsables (saisie manuelle ou scan d'un QR code genere a partir du
+     secret), type TOTP, base de temps 30 s, 6 chiffres.
+
+Securite - a savoir :
+  - Le secret est present en clair dans le binaire : il peut etre extrait
+    par ingenieurie inverse. C'est le prix du choix "pas de fichier".
+  - Ne pas diffuser le secret a des personnes non autorisees.
+  - Si le secret doit etre change, recompiler et redistribuer l'exe.
+
+Les anciens fichiers admin_password.txt / admin_secret.txt ne sont PLUS
+UTILISES par le programme et peuvent etre supprimes des postes.
+
+--------------------------------------------------------------------------------
+3. FICHIERS MODIFIES / CREES
+--------------------------------------------------------------------------------
+CREES :
+  - lib\TOTP.h / lib\TOTP.cpp
+      Module TOTP (RFC 6238) autonome : decodage Base32, HMAC-SHA1,
+      generation du code et verification. Aucune dependance externe
+      (l'implementation SHA-1/HMAC est integree, pas de lien OpenSSL requis).
+
+  - PasswordDlg.h / PasswordDlg.cpp (modifies)
+      La boite de dialogue demande maintenant le code 2FA a 6 chiffres
+      (membre CString "code", champ non masque).
+
+MODIFIES :
+  - mainDlg.cpp
+      CheckAdminAuth() n'utilise plus aucun fichier : le secret Base32 est
+      une constante en dur, et le code saisi est verifie avec TOTP::verify()
+      (fenetre de +/- 1 pas de 30s pour tolerer le decalage d'horloge).
+      Les 5 points d'acces sont inchanges.
+
+  - res\dialog.rc2
+      Ressource IDD_PASSWORD : legende "Two-Factor Authentication", libelle
+      "Enter 2FA code:", champ sans masquage.
+
+  - microsip.vcxproj et microsip.vcxproj.filters
+      Enregistrement des fichiers lib\TOTP.cpp / lib\TOTP.h dans le projet.
+
+--------------------------------------------------------------------------------
+4. FONCTIONNEMENT TECHNIQUE
+--------------------------------------------------------------------------------
+La methode CmainDlg::CheckAdminAuth() (dans mainDlg.cpp) :
+
+  1. Lit le secret Base32 stocke en dur dans la constante TOTPSecret.
+  2. Affiche la boite PasswordDlg (dialogue modal) demandant le code.
+  3. Verifie le code avec TOTP::verify(secret, code) :
+        - le compteur est calcule :  UNIX Time / 30 secondes
+        - les codes du compteur courant + /- 1 (fenetre) sont compares
+        - code valide      -> retourne true (acces AUTORISE)
+        - code invalide    -> message "Invalid 2FA code. Access denied." et false
+
+Algorithme TOTP (RFC 6238) dans lib\TOTP.cpp :
+  - decodeBase32()  : decodage du secret en octets (ignore espaces, '-', '=')
+  - hmacSha1()      : HMAC-SHA1 integre (vecteurs de test RFC 4226 / RFC 6238
+                      valides)
+  - totpFromCounter : troncature dynamique + code a N chiffres (6 par defaut)
+  - verify()        : accepte un ecart de +/- `window` pas de temps (defaut 1)
+
+Points d'acces proteges (tous dans mainDlg.cpp), chacun verifie d'abord :
+    if (!CheckAdminAuth()) { return; }
+
+  - OnMenuAccountAdd()          : "Ajouter un compte..."
+  - OnMenuAccountEdit()         : "Editer un compte" (tous les comptes)
+  - OnMenuAccountLocalEdit()    : "Editer le compte local"
+  - OnMenuSettings()            : "Parametres"
+  - OnAccount()                 : auto-ouverture compte (aucun compte configure)
+
+Remarques :
+  - Les raccourcis clavier Ctrl+P / Ctrl+M / Ctrl+L passent deja par ces
+    memes fonctions (BaseDialog.cpp), ils sont donc automatiquement proteges.
+  - Le code est demande A CHAQUE ACCES (aucune memorisation de session).
+  - Le menu contextuel (clic droit sur l'icone de la barre des taches) et le
+    bouton "Menu" utilisent le meme code : proteges egalement.
+
+--------------------------------------------------------------------------------
+5. MIS EN PLACE POUR LES RESPONSABLES
+--------------------------------------------------------------------------------
+  1. Generer un secret aleatoire Base32 (voir section 2).
+  2. Remplacer la constante TOTPSecret dans mainDlg.cpp.
+  3. Recompiler microsip.exe.
+  4. Enregistrer le secret dans l'application d'authentification des
+     responsables (TOTP, 30 s, 6 chiffres).
+  5. Distribuer le nouvel exe et supprimer les anciens fichiers
+     admin_password.txt / admin_secret.txt s'ils existent.
+
+--------------------------------------------------------------------------------
+6. COMPILATION ET LIVRAISON
+--------------------------------------------------------------------------------
+La compilation Release Win32 se fait avec MSBuild :
+
+  MSBuild.exe microsip.vcxproj /p:Configuration=Release /p:Platform=Win32
+
+Binaire genere :
+  Release\microsip.exe
+
+Pour livrer :
+  1. Copier le nouveau microsip.exe sur les postes des agents.
+  2. Le secret etant dans le binaire, aucun fichier complementaire n'est
+     necessaire a cote de l'application.
+
+Remarque de build : pendant la compilation, le lien peut echouer avec
+"LNK1104: impossible d'ouvrir microsip.exe" si l'application precedente est
+encore en cours d'execution ou verouillee (antivirus). Fermer le programme et
+reessayer, ou renommer/retirer l'ancien .exe.
+
+--------------------------------------------------------------------------------
+7. TEST RAPIDE (recommandations)
+--------------------------------------------------------------------------------
+  1. Ouvrir "Parametres" -> la boite de code 2FA s'affiche.         [ATTENDU]
+  2. Saisir un code incorrect -> message "Access denied", rien ne
+     s'ouvre.                                                       [ATTENDU]
+  3. Saisir le code valide de l'application d'authentification ->
+     la fenetre Parametres s'ouvre.                                 [ATTENDU]
+  4. Fermer la fenetre et re-cliquer : un nouveau code est demande
+     (pas de memorisation).                                         [ATTENDU]
+  5. Verifier "Editer un compte", "Ajouter un compte..." et Ctrl+P / Ctrl+M
+     de la meme maniere.
+  6. Decaler l'horloge de la machine d'une vingtaine de secondes : le code
+     du pas precedent reste accepte (fenetre de tolerance).         [ATTENDU]
+================================================================================
